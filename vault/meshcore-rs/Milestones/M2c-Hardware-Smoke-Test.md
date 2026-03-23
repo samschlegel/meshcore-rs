@@ -5,7 +5,8 @@
 ## Deliverables
 - [x] RAK4631 board crate — Embassy executor, LED checkpoints, SPI + SX1262 init via lora-phy
 - [x] TX test firmware — transmit packets on 910.525 MHz, confirmed with SDR
-- [ ] RX test firmware — listen for packets from MeshCore devices, LED/serial indication
+- [x] RX test firmware — continuous RX with USB CDC serial output, hex/ASCII dump, RSSI/SNR
+- [x] MeshCore packet parsing — meshcore-core Packet::read_from() validated against live traffic
 - [ ] TX/RX interop — send packets that a MeshCore device can receive, and vice versa
 
 ## Dependencies
@@ -17,5 +18,6 @@
 ## Acceptance Criteria
 - [x] RAK4631 firmware compiles and flashes via UF2
 - [x] TX confirmed on air with SDR
-- [ ] RX firmware receives packets from MeshCore devices
+- [x] RX firmware receives packets from MeshCore devices
+- [x] Packet parsing works against real MeshCore ADVERT packets
 - [ ] Bidirectional TX/RX with at least one MeshCore device
