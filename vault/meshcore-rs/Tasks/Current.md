@@ -7,4 +7,4 @@ Tasks actively being worked on.
 - [x] SX1262 radio TX on RAK4631 #board #radio
 - [x] RX with USB serial output on RAK4631 #board #radio
 - [x] MeshCore packet parsing on live traffic #board #core
-- [ ] TX/RX interop with MeshCore devices #board #radio
+- [x] TX/RX interop with MeshCore devices #board #radio

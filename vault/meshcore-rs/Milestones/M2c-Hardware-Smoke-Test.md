@@ -1,5 +1,7 @@
 # M2c: Hardware Smoke Test
 
+**Status: COMPLETE**
+
 **Goal:** Validate radio TX and RX on the RAK4631 board, including interop with existing MeshCore devices.
 
 ## Deliverables
@@ -7,7 +9,13 @@
 - [x] TX test firmware — transmit packets on 910.525 MHz, confirmed with SDR
 - [x] RX test firmware — continuous RX with USB CDC serial output, hex/ASCII dump, RSSI/SNR
 - [x] MeshCore packet parsing — meshcore-core Packet::read_from() validated against live traffic
-- [ ] TX/RX interop — send packets that a MeshCore device can receive, and vice versa
+- [x] TX/RX interop — signed ADVERT received by MeshCore devices, MeshCore packets parsed by us
+
+## Key Findings
+- MeshCore uses **private sync word** (0x1424), **16-symbol preamble**, CRC on, explicit header
+- lora-phy `LoRa::new(radio, false, delay)` correctly sets private sync word
+- Ed25519 signing adds only ~4KB to binary (65KB total with LTO)
+- DIO1 async wait via GPIOTE — CPU sleeps between packets
 
 ## Dependencies
 - [[M2-Radio-Traits]] (Radio trait)
@@ -20,4 +28,4 @@
 - [x] TX confirmed on air with SDR
 - [x] RX firmware receives packets from MeshCore devices
 - [x] Packet parsing works against real MeshCore ADVERT packets
-- [ ] Bidirectional TX/RX with at least one MeshCore device
+- [x] Bidirectional TX/RX with at least one MeshCore device
