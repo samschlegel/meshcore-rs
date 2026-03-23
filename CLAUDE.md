@@ -96,13 +96,14 @@ CIPHER_MAC_SIZE    = 2 bytes
 ### Task Tracking
 - Obsidian vault at `vault/meshcore-rs/` for task and milestone tracking
 - Tasks use Obsidian-native checkbox format: `- [ ] Task description #tag`
-- Manage via CLI: `obsidian tasks todo`, `obsidian task done path=X line=N`
+- Manage via CLI: `obsidian tasks todo vault=meshcore-rs`, `obsidian task done path=X line=N vault=meshcore-rs`
 - Vault name for CLI commands: `meshcore-rs`
+- **IMPORTANT:** When a task is completed, immediately mark it done in the vault (`obsidian task done ...` or edit the checkbox to `[x]`). When starting a task, move it from `Tasks/Backlog.md` to `Tasks/Current.md`. Vault task status must stay in sync with actual work — do not defer updates.
 
 ### Agent Workflow
 - Use `/agent-team` skill for iterative multi-step implementation work
 - Create skills in `.claude/skills/<name>/SKILL.md` to teach future agents reusable procedures
-- Track work progress in the Obsidian vault
+- Track work progress in the Obsidian vault — update task status at the **start** and **end** of each task
 
 ### Verification Checklist
 Run after every implementation change:
