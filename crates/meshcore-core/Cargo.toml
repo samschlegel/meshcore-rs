@@ -1,0 +1,24 @@
+[package]
+name = "meshcore-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Core types for MeshCore mesh networking protocol"
+
+[features]
+default = []
+std = ["ed25519-dalek/std", "sha2/std", "hmac/std"]
+defmt = ["dep:defmt"]
+
+[dependencies]
+heapless.workspace = true
+defmt = { workspace = true, optional = true }
+ed25519-dalek = { workspace = true, features = ["hazmat"] }
+x25519-dalek.workspace = true
+sha2.workspace = true
+hmac.workspace = true
+aes.workspace = true
+curve25519-dalek.workspace = true
+
+[dev-dependencies]
+rand = "0.8"

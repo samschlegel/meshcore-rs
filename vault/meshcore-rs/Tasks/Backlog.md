@@ -1,7 +1,7 @@
 # Backlog
 
-- [ ] Create meshcore-core crate with packet types and header parsing #core
-- [ ] Implement Identity types (Ed25519 public key, local identity) #core
+- [x] Create meshcore-core crate with packet types and header parsing #core
+- [x] Implement Identity types (Ed25519 public key, local identity) #core
 - [ ] Define Radio trait in meshcore-radio #radio
 - [ ] Implement Dispatcher packet queue in meshcore-dispatch #dispatch
 - [ ] Implement Mesh routing layer #mesh
