@@ -17,6 +17,10 @@ embedded-hal = "1.0"
 embedded-hal-async = "1.0"
 embedded-hal-bus = { version = "0.3", features = ["async"] }
 
+# USB serial
+embassy-usb = "0.5"
+static_cell = "2"
+
 # Embedded
 cortex-m = { version = "0.7", features = ["inline-asm", "critical-section-single-core"] }
 cortex-m-rt = { version = "0.7" }
