@@ -1,24 +1,21 @@
 # M2c: Hardware Smoke Test
 
-**Goal:** Flash firmware to real boards and validate radio TX/RX between two devices.
+**Goal:** Validate radio TX and RX on the RAK4631 board, including interop with existing MeshCore devices.
 
 ## Deliverables
-- [ ] RAK4631 board crate — Embassy executor, SPI pin config, SX1262 init, USB serial output
-- [ ] Heltec V3 board crate — Embassy executor, SPI pin config, SX1262 init, USB serial output
-- [ ] TX test firmware — transmit a known packet every 2 seconds, print to USB serial
-- [ ] RX test firmware — listen for packets, print received data + RSSI/SNR to USB serial
-- [ ] Two-board smoke test — TX on one board, RX on the other, confirm data matches
+- [x] RAK4631 board crate — Embassy executor, LED checkpoints, SPI + SX1262 init via lora-phy
+- [x] TX test firmware — transmit packets on 910.525 MHz, confirmed with SDR
+- [ ] RX test firmware — listen for packets from MeshCore devices, LED/serial indication
+- [ ] TX/RX interop — send packets that a MeshCore device can receive, and vice versa
 
 ## Dependencies
 - [[M2-Radio-Traits]] (Radio trait)
 - [[M2b-SX1262-Driver]] (SX1262 Radio impl)
 - `embassy-nrf` (RAK4631)
-- `esp-hal` (Heltec V3)
-- Physical hardware + USB cables
+- Physical hardware: RAK4631 + RAK19007, MeshCore devices, SDR for debugging
 
 ## Acceptance Criteria
-- [ ] RAK4631 firmware compiles and flashes via USB
-- [ ] Heltec V3 firmware compiles and flashes via USB
-- [ ] TX board sends packets visible on RX board's serial output
-- [ ] RSSI/SNR values are reasonable (not all zeros)
-- [ ] Both boards can act as either TX or RX
+- [x] RAK4631 firmware compiles and flashes via UF2
+- [x] TX confirmed on air with SDR
+- [ ] RX firmware receives packets from MeshCore devices
+- [ ] Bidirectional TX/RX with at least one MeshCore device
