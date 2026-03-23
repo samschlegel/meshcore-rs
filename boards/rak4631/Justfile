@@ -1,0 +1,22 @@
+# RAK4631 firmware build and flash helpers
+
+# Build release firmware and generate UF2
+build:
+    cargo build --release
+    cargo objcopy --release -- -O binary target/firmware.bin
+    uf2conv target/firmware.bin --base 0x1000 --family 0xADA52840 --output target/firmware.uf2
+    @echo "UF2 ready: target/firmware.uf2"
+
+# Copy UF2 to bootloader drive (double-press RESET first)
+flash drive="D:":
+    cp target/firmware.uf2 {{drive}}/
+    @echo "Flashed to {{drive}}"
+
+# Build and flash in one step
+deploy drive="D:": build
+    cp target/firmware.uf2 {{drive}}/
+    @echo "Deployed to {{drive}}"
+
+# Show binary size
+size:
+    cargo size --release -- -A

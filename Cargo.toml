@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["crates/meshcore-core", "crates/meshcore-radio"]
+exclude = ["boards/rak4631", "boards/heltec-v3"]
 
 [workspace.package]
 edition = "2021"
