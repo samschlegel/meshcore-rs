@@ -10,11 +10,14 @@ default = []
 std = []
 defmt = ["dep:defmt"]
 mock = []
+sx1262 = ["dep:lora-phy", "dep:embedded-hal-async"]
 
 [dependencies]
 heapless.workspace = true
 defmt = { workspace = true, optional = true }
 embassy-time.workspace = true
+embedded-hal-async = { workspace = true, optional = true }
+lora-phy = { workspace = true, optional = true }
 meshcore-core = { path = "../meshcore-core" }
 
 [dev-dependencies]

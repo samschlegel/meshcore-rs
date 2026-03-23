@@ -9,6 +9,9 @@ pub mod rtc;
 #[cfg(any(test, feature = "mock"))]
 pub mod mock;
 
+#[cfg(feature = "sx1262")]
+pub mod sx1262;
+
 pub use radio::{Radio, RadioConfig, RadioError, RecvResult};
 pub use rng::Rng;
 pub use rtc::RtcClock;

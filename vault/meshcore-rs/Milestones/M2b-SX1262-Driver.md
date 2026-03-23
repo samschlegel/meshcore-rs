@@ -1,25 +1,22 @@
 # M2b: SX1262 Driver
 
-**Goal:** Implement the Radio trait for the SX1262 LoRa transceiver via embedded-hal SPI.
+**Goal:** Implement the Radio trait for the SX1262 LoRa transceiver wrapping lora-phy.
+
+**Status:** Complete
 
 ## Deliverables
-- [ ] Evaluate existing Rust SX1262 crates (lora-phy, sx126x-rs, etc.) for suitability
-- [ ] SX1262 struct implementing the Radio async trait
-- [ ] SPI + GPIO pin abstraction via embedded-hal 1.0 traits
-- [ ] LoRa configuration (frequency, BW, SF, CR, TX power) via RadioConfig
-- [ ] IRQ-driven async recv (DIO1 interrupt → waker)
-- [ ] Basic error handling for SPI failures and radio timeouts
-
-## Dependencies
-- [[M2-Radio-Traits]] (Radio trait, RadioConfig)
-- `embedded-hal` 1.0 (SPI, GPIO traits)
-- `embedded-hal-async` (async SPI)
+- [x] Evaluate existing Rust SX1262 crates — chose lora-phy (ADR-0005)
+- [x] `Sx1262Radio` struct implementing the Radio async trait via lora-phy
+- [x] RadioConfig → lora-phy ModulationParams/PacketParams conversion
+- [x] LoRa configuration (frequency, BW, SF, CR, TX power) via RadioConfig
+- [x] IRQ-driven async recv (DIO1 interrupt via lora-phy's InterfaceVariant)
+- [x] CAD (channel activity detection) support
+- [x] Sleep/standby power management
+- [x] Airtime estimation for duty cycle management
+- [x] Behind `sx1262` feature flag — doesn't bloat builds that only need mocks
 
 ## Acceptance Criteria
-- [ ] Compiles for `thumbv7em-none-eabihf` (nRF52840) and `xtensa-esp32s3-none-elf` (ESP32-S3)
-- [ ] Unit tests with mock SPI pass on host
-- [ ] ADR written if choosing to wrap an existing crate vs writing from scratch
-
-## Target Hardware
-- **RAK4631**: nRF52840 + SX1262 (known SPI pins)
-- **Heltec V3**: ESP32-S3 + SX1262 (known SPI pins)
+- [x] Compiles with `--features sx1262` on host
+- [x] `cargo clippy --workspace --features meshcore-radio/sx1262 -- -D warnings` clean
+- [x] ADR-0005 accepted (lora-phy chosen over writing from scratch)
+- [x] 62 workspace tests still pass

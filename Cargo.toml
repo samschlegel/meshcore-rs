@@ -20,3 +20,5 @@ curve25519-dalek = { version = "4", default-features = false }
 embassy-time = { version = "0.4", default-features = false }
 embassy-sync = { version = "0.6", default-features = false }
 embassy-futures = { version = "0.1", default-features = false }
+lora-phy = { version = "3.0", default-features = false }
+embedded-hal-async = { version = "1.0", default-features = false }
