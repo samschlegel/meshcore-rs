@@ -20,6 +20,7 @@ Rust reimplementation of [MeshCore](https://github.com/rmenke/MeshCore), a LoRa 
 ## Architecture Principles
 
 - **Layered traits:** Radio → Dispatcher → Mesh → Application behaviors
+- **Embassy async execution model** (ADR-0004): `meshcore-core` is synchronous (pure data, no timing). All other crates (`meshcore-radio`, `meshcore-dispatch`, `meshcore-mesh`, `meshcore-serial`, `meshcore-app`) use Embassy async — `async fn` in traits, `embassy-sync` channels, `embassy-time` timers. Board crates are thin wiring (hardware init + task spawning).
 - **Composable roles:** A node is assembled from independent capabilities (Forwarding, ContactStore, SerialProtocol, RoomManagement). "Repeater" = forwarding + neighbor tracking. "Companion" = contact store + serial protocol. "Room Server" = room management + contact store. These can overlap freely.
 - **Generics over dynamic dispatch:** `Dispatcher<R: Radio, C: Clock>` enables monomorphization (no vtable overhead on embedded)
 - **Enums with exhaustive match** for packet types, route types, payload types
@@ -141,6 +142,9 @@ cargo test --workspace
 | `heapless` | Static collections | Yes |
 | `defmt` / `defmt-rtt` | Embedded logging | Yes |
 | `embedded-hal` 1.0 | Hardware abstraction traits | Yes |
+| `embassy-executor` | Async task executor | Yes |
+| `embassy-sync` | Async channels, signals, mutexes | Yes |
+| `embassy-time` | Async timers and delays | Yes |
 | `embassy-nrf` | nRF52840 async HAL | Yes |
 | `esp-hal` | ESP32 HAL | Yes |
 
