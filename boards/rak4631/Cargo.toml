@@ -11,6 +11,9 @@ embassy-time = "0.5"
 embassy-nrf = { version = "0.10", features = ["nrf52840", "time-driver-rtc1", "gpiote", "time"] }
 embassy-futures = "0.1"
 
+# MeshCore protocol
+meshcore-core = { path = "../../crates/meshcore-core" }
+
 # LoRa radio
 lora-phy = { version = "3.0", default-features = false }
 embedded-hal = "1.0"
@@ -25,7 +28,3 @@ static_cell = "2"
 cortex-m = { version = "0.7", features = ["inline-asm", "critical-section-single-core"] }
 cortex-m-rt = { version = "0.7" }
 panic-halt = "1"
-
-[profile.release]
-opt-level = "z"
-lto = true

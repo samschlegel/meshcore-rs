@@ -28,6 +28,7 @@ use embedded_hal_bus::spi::ExclusiveDevice;
 use lora_phy::iv::GenericSx126xInterfaceVariant;
 use lora_phy::sx126x::{self, Sx126x, TcxoCtrlVoltage};
 use lora_phy::{LoRa, RxMode};
+use meshcore_core::packet::Packet;
 use static_cell::StaticCell;
 
 bind_interrupts!(struct Irqs {
@@ -230,15 +231,17 @@ async fn main(spawner: Spawner) {
     cdc_write(&mut cdc, b"Listening...\r\n\r\n").await;
 
     // ---- RX loop ----
+    // Prepare once — in continuous mode the radio stays in RX after each packet.
+    // rx() uses DIO1 async wait (GPIOTE interrupt), so the CPU sleeps between packets.
+    lora.prepare_for_rx(RxMode::Continuous, &mod_params, &rx_pkt_params)
+        .await
+        .unwrap();
+
     let mut rx_buf = [0u8; 255];
     let mut pkt_count: u32 = 0;
 
     loop {
         blue.set_high(); // blue = listening
-
-        lora.prepare_for_rx(RxMode::Continuous, &mod_params, &rx_pkt_params)
-            .await
-            .unwrap();
 
         match lora.rx(&rx_pkt_params, &mut rx_buf).await {
             Ok((len, status)) => {
@@ -277,7 +280,7 @@ async fn main(spawner: Spawner) {
                 cdc_write(&mut cdc, &hex_buf[..pos]).await;
 
                 // ASCII representation
-                let mut asc_buf = [0u8; 266]; // "  asc: " + 255 + "\r\n\r\n"
+                let mut asc_buf = [0u8; 266]; // "  asc: " + 255 + "\r\n"
                 let mut pos = 0;
                 for &b in b"  asc: " {
                     asc_buf[pos] = b;
@@ -287,11 +290,55 @@ async fn main(spawner: Spawner) {
                     asc_buf[pos] = if b >= 0x20 && b < 0x7f { b } else { b'.' };
                     pos += 1;
                 }
-                for &b in b"\r\n\r\n" {
+                for &b in b"\r\n" {
                     asc_buf[pos] = b;
                     pos += 1;
                 }
                 cdc_write(&mut cdc, &asc_buf[..pos]).await;
+
+                // Parse as MeshCore packet
+                let mut pkt = Packet::new();
+                if pkt.read_from(data) {
+                    pkt.snr = status.snr as i8;
+                    let mut sb = SmallBuf::new();
+                    match pkt.parsed_header() {
+                        Ok(hdr) => {
+                            let _ = write!(
+                                sb,
+                                "  pkt: {:?}/{:?} v{}",
+                                hdr.route_type, hdr.payload_type, hdr.version as u8
+                            );
+                        }
+                        Err(_) => {
+                            let _ = write!(sb, "  pkt: hdr=0x{:02x} (invalid)", pkt.header);
+                        }
+                    }
+                    cdc_write(&mut cdc, sb.as_bytes()).await;
+
+                    let mut sb = SmallBuf::new();
+                    let _ = write!(
+                        sb,
+                        " path={}/{} payload={}B",
+                        pkt.path_hash_count(),
+                        pkt.path_hash_size(),
+                        pkt.payload.len()
+                    );
+                    cdc_write(&mut cdc, sb.as_bytes()).await;
+
+                    if pkt.has_transport_codes() {
+                        let mut sb = SmallBuf::new();
+                        let _ = write!(
+                            sb,
+                            " tc=[{:04x},{:04x}]",
+                            pkt.transport_codes[0], pkt.transport_codes[1]
+                        );
+                        cdc_write(&mut cdc, sb.as_bytes()).await;
+                    }
+                    cdc_write(&mut cdc, b"\r\n").await;
+                } else {
+                    cdc_write(&mut cdc, b"  pkt: parse failed\r\n").await;
+                }
+                cdc_write(&mut cdc, b"\r\n").await;
 
                 // Green flash for each received packet
                 Timer::after_millis(100).await;
