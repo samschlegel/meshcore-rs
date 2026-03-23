@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = []
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/user/meshcore-rs"
+
+[workspace.dependencies]
+heapless = "0.8"
+defmt = "0.3"
+embedded-hal = "1.0"
+ed25519-dalek = { version = "2", default-features = false }
+x25519-dalek = { version = "2", default-features = false, features = ["static_secrets"] }
