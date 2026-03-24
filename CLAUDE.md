@@ -106,6 +106,10 @@ CIPHER_MAC_SIZE    = 2 bytes
 - Create skills in `.claude/skills/<name>/SKILL.md` to teach future agents reusable procedures
 - Track work progress in the Obsidian vault — update task status at the **start** and **end** of each task
 
+### Shell Commands
+- Use `git -C A:/code/meshcore-rs <command>` instead of `cd A:/code/meshcore-rs && git <command>`. The `-C` flag avoids `cd` chains that trigger permission guards.
+- Similarly, use `cargo --manifest-path A:/code/meshcore-rs/Cargo.toml` or run cargo from the project dir with `-C` where supported.
+
 ### Verification Checklist
 Run after every implementation change:
 ```bash
