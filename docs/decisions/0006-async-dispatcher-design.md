@@ -1,6 +1,6 @@
 # Async Dispatcher design: channels + select over radio and TX queue
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-03-23
 
 ## Context and Problem Statement

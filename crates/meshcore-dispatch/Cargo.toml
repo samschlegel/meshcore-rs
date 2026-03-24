@@ -1,0 +1,23 @@
+[package]
+name = "meshcore-dispatch"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+meshcore-core = { path = "../meshcore-core" }
+meshcore-radio = { path = "../meshcore-radio" }
+heapless = { workspace = true }
+embassy-time = { workspace = true }
+embassy-sync = { workspace = true }
+embassy-futures = { workspace = true }
+defmt = { workspace = true, optional = true }
+
+[dev-dependencies]
+embassy-time = { workspace = true, features = ["mock-driver", "generic-queue-8"] }
+meshcore-radio = { path = "../meshcore-radio", features = ["mock"] }
+critical-section = { version = "1", features = ["std"] }
+
+[features]
+default = []
+defmt = ["dep:defmt", "meshcore-core/defmt", "meshcore-radio/defmt"]

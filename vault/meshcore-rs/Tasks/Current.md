@@ -8,3 +8,4 @@ Tasks actively being worked on.
 - [x] RX with USB serial output on RAK4631 #board #radio
 - [x] MeshCore packet parsing on live traffic #board #core
 - [x] TX/RX interop with MeshCore devices #board #radio
+- [x] meshcore-dispatch crate: TxQueue, RxDelayQueue, DutyCycleTracker, Dispatcher #dispatch

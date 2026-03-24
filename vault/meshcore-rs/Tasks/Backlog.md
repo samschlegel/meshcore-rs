@@ -5,7 +5,7 @@
 - [x] Define Radio trait in meshcore-radio #radio
 - [x] Implement SX1262 driver wrapping lora-phy #radio
 - [x] nRF52840 (RAK4631) board crate bringup #board
-- [ ] Implement Dispatcher packet queue in meshcore-dispatch #dispatch
+- [x] Implement Dispatcher packet queue in meshcore-dispatch #dispatch
 - [ ] Implement Mesh routing layer #mesh
 - [ ] Create USB serial interface in meshcore-serial #serial
 - [ ] Set up CI pipeline (cargo check, clippy, test) #infra
