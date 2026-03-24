@@ -1,6 +1,7 @@
 //! RAK4631 channel command responder — M4a firmware.
 //!
 //! Listens on the `#meshcore-rs` channel and responds to commands:
+//!   - `!help`   → lists available commands
 //!   - `!ping`   → replies with `pong`
 //!   - `!status` → replies with uptime and dispatcher stats
 //!   - `!path`   → echoes path hashes from the incoming packet
@@ -370,7 +371,11 @@ async fn user_task(mut cdc: CdcAcmClass<'static, MyUsbDriver>, rtc: &'static Sha
 
         // Match commands and build response
         let mut resp_buf = FmtBuf::<160>::new();
-        let has_response = if body.starts_with("!ping") {
+        let node = core::str::from_utf8(NODE_NAME).unwrap_or("?");
+        let has_response = if body.starts_with("!help") {
+            let _ = write!(resp_buf, "{}: !help !ping !status !path", node);
+            true
+        } else if body.starts_with("!ping") {
             for &b in NODE_NAME {
                 resp_buf.push(b);
             }
@@ -381,7 +386,7 @@ async fn user_task(mut cdc: CdcAcmClass<'static, MyUsbDriver>, rtc: &'static Sha
             let _ = write!(
                 resp_buf,
                 "{}: up {}s, rx={} tx={}",
-                core::str::from_utf8(NODE_NAME).unwrap_or("?"),
+                node,
                 uptime_secs,
                 pkt_count,
                 0u32, // TODO: expose dispatcher stats
@@ -391,7 +396,7 @@ async fn user_task(mut cdc: CdcAcmClass<'static, MyUsbDriver>, rtc: &'static Sha
             let _ = write!(
                 resp_buf,
                 "{}: path hashes={}/{}B [",
-                core::str::from_utf8(NODE_NAME).unwrap_or("?"),
+                node,
                 pkt.path_hash_count(),
                 pkt.path_hash_size(),
             );
