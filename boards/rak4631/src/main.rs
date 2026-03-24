@@ -1,11 +1,15 @@
-//! RAK4631 Dispatcher smoke test — validates M3 on real hardware.
+//! RAK4631 channel command responder — M4a firmware.
+//!
+//! Listens on the `#meshcore-rs` channel and responds to commands:
+//!   - `!ping`   → replies with `pong`
+//!   - `!status` → replies with uptime and dispatcher stats
+//!   - `!path`   → echoes path hashes from the incoming packet
 //!
 //! On boot:
 //!   1. Initialize SX1262 via meshcore-radio's Sx1262Radio (Radio trait)
 //!   2. Create a Dispatcher that owns the radio
-//!   3. Submit a GrpTxt to #meshcore-rs via TX channel
-//!   4. Dispatcher handles TX scheduling, duty cycle, CAD
-//!   5. Received packets are delivered via RX channel and printed to USB serial
+//!   3. Submit a GrpTxt greeting to #meshcore-rs via TX channel
+//!   4. RX loop decodes GrpTxt, matches commands, sends responses
 //!
 //! LED patterns:
 //!   1 green blink  = entered main
@@ -40,9 +44,9 @@ use embedded_hal_bus::spi::ExclusiveDevice;
 use lora_phy::iv::GenericSx126xInterfaceVariant;
 use lora_phy::sx126x::{self, Sx126x, TcxoCtrlVoltage};
 use lora_phy::LoRa;
-use meshcore_core::crypto::encrypt_then_mac;
-use meshcore_core::header::{PacketHeader, PayloadType, PayloadVersion, RouteType};
-use meshcore_core::packet::Packet;
+use meshcore_core::dedup::PacketDedup;
+use meshcore_core::grp_txt::{decode_grp_txt, encode_grp_txt, matches_channel};
+use meshcore_core::header::PayloadType;
 use meshcore_dispatch::types::{DispatcherConfig, RxPacket, TxRequest};
 use meshcore_dispatch::Dispatcher;
 use meshcore_radio::radio::RadioConfig;
@@ -212,90 +216,88 @@ async fn persist_rtc_task(rtc: &'static SharedRtc) {
     }
 }
 
-/// User task: submits TX on boot, then reads RX packets and prints to USB serial.
+/// Node name used as sender in channel messages.
+const NODE_NAME: &[u8] = b"rak4631";
+
+/// Derive channel secret and hash from a channel name.
+/// Secret = SHA256(name)[0..16] zero-extended to 32 bytes.
+/// Hash = SHA256(secret[0..16])[0].
+fn derive_channel_key(name: &[u8]) -> ([u8; 32], u8) {
+    let mut secret = [0u8; 32];
+    let hash = Sha256::new().chain_update(name).finalize();
+    secret[..16].copy_from_slice(&hash[..16]);
+
+    let channel_hash = Sha256::new().chain_update(&secret[..16]).finalize()[0];
+    (secret, channel_hash)
+}
+
+/// Format a command response message as `"<node>: <body>"`.
+fn format_response<const N: usize>(body: &[u8]) -> FmtBuf<N> {
+    let mut buf = FmtBuf::<N>::new();
+    for &b in NODE_NAME {
+        buf.push(b);
+    }
+    buf.push(b':');
+    buf.push(b' ');
+    for &b in body {
+        buf.push(b);
+    }
+    buf
+}
+
+/// User task: sends greeting on boot, then handles channel commands.
 #[embassy_executor::task]
 async fn user_task(mut cdc: CdcAcmClass<'static, MyUsbDriver>, rtc: &'static SharedRtc) {
     // Give USB a moment to enumerate
     Timer::after_millis(500).await;
 
-    cdc_write(&mut cdc, b"\r\n=== RAK4631 Dispatcher Test ===\r\n").await;
+    cdc_write(&mut cdc, b"\r\n=== RAK4631 Channel Responder ===\r\n").await;
     cdc_write(
         &mut cdc,
         b"910.525 MHz / SF7 / BW62.5kHz / CR4_5 / preamble=16\r\n",
     )
     .await;
-    cdc_write(&mut cdc, b"Using meshcore-dispatch Dispatcher\r\n\r\n").await;
 
     // Print RTC status
     {
         let epoch = rtc.lock().await.get_time();
         let mut sb = FmtBuf::<80>::new();
-        let _ = write!(sb, "RTC epoch: {} (build: {})\r\n\r\n", epoch, BUILD_EPOCH);
+        let _ = write!(sb, "RTC epoch: {} (build: {})\r\n", epoch, BUILD_EPOCH);
         cdc_write(&mut cdc, sb.as_bytes()).await;
     }
 
-    let channel_name = b"#meshcore-rs";
-    let mut channel_secret = [0u8; 32];
+    let (channel_secret, channel_hash) = derive_channel_key(b"#meshcore-rs");
+
     {
-        let mut hasher = Sha256::new();
-        hasher.update(channel_name);
-        let hash = hasher.finalize();
-        channel_secret[..16].copy_from_slice(&hash[..16]);
+        let mut sb = FmtBuf::<64>::new();
+        let _ = write!(sb, "Channel: #meshcore-rs (hash=0x{:02x})\r\n\r\n", channel_hash);
+        cdc_write(&mut cdc, sb.as_bytes()).await;
     }
 
-    let channel_hash = {
-        let mut hasher = Sha256::new();
-        hasher.update(&channel_secret[..16]);
-        let result = hasher.finalize();
-        result[0]
-    };
+    // Dedup table — 128 entries matches C's SimpleMeshTables
+    let mut dedup = PacketDedup::<128>::new();
 
-    let message = b"meshcore-rs: hello from Dispatcher!";
-    let timestamp: u32 = rtc.lock().await.get_time();
-    let mut plaintext = [0u8; 128];
-    plaintext[..4].copy_from_slice(&timestamp.to_le_bytes());
-    plaintext[4] = 0x00;
-    plaintext[5..5 + message.len()].copy_from_slice(message);
-    let plaintext_len = 5 + message.len();
+    // Send boot greeting (pre-register in dedup to prevent self-echo)
+    let timestamp = rtc.lock().await.get_time();
+    let greeting = format_response::<128>(b"online");
+    if let Some(pkt) = encode_grp_txt(&channel_secret, channel_hash, timestamp, greeting.as_bytes()) {
+        let mut sb = FmtBuf::<64>::new();
+        let _ = write!(sb, "TX greeting: len={}\r\n", pkt.wire_len());
+        cdc_write(&mut cdc, sb.as_bytes()).await;
 
-    let mut encrypted = [0u8; 184];
-    let enc_len = encrypt_then_mac(&channel_secret, &mut encrypted, &plaintext[..plaintext_len]);
-
-    let mut grp_payload = [0u8; 184];
-    grp_payload[0] = channel_hash;
-    grp_payload[1..1 + enc_len].copy_from_slice(&encrypted[..enc_len]);
-    let payload_len = 1 + enc_len;
-
-    let header_byte: u8 = PacketHeader {
-        route_type: RouteType::Flood,
-        payload_type: PayloadType::GrpTxt,
-        version: PayloadVersion::V1,
+        dedup.has_seen(&pkt); // pre-register to avoid self-echo
+        TX_CHANNEL
+            .send(TxRequest {
+                packet: pkt,
+                priority: 0,
+                delay_ms: 0,
+            })
+            .await;
     }
-    .into();
 
-    let mut grp_pkt = Packet::new();
-    grp_pkt.header = header_byte;
-    grp_pkt.set_path_hash_size_and_count(1, 0);
-    grp_pkt
-        .payload
-        .extend_from_slice(&grp_payload[..payload_len])
-        .expect("GrpTxt payload exceeds MAX_PACKET_PAYLOAD");
+    cdc_write(&mut cdc, b"Listening for commands...\r\n\r\n").await;
 
-    // Submit TX request via channel — Dispatcher will handle scheduling + CAD + duty cycle
-    let mut sb = FmtBuf::<64>::new();
-    let _ = write!(sb, "TX GrpTxt #meshcore-rs: len={} ch=0x{:02x}\r\n", grp_pkt.wire_len(), channel_hash);
-    cdc_write(&mut cdc, sb.as_bytes()).await;
-
-    TX_CHANNEL
-        .send(TxRequest {
-            packet: grp_pkt,
-            priority: 0,
-            delay_ms: 0,
-        })
-        .await;
-
-    cdc_write(&mut cdc, b"TX queued. Listening for RX...\r\n\r\n").await;
-
+    let boot_time = embassy_time::Instant::now();
     let mut pkt_count: u32 = 0;
 
     loop {
@@ -303,44 +305,139 @@ async fn user_task(mut cdc: CdcAcmClass<'static, MyUsbDriver>, rtc: &'static Sha
         pkt_count += 1;
 
         let pkt = &rx_pkt.packet;
-        let mut out = FmtBuf::<256>::new();
 
-        // Summary line
-        let _ = write!(out, "[{}] rssi={:.0} snr={:.1}", pkt_count, rx_pkt.rssi, rx_pkt.snr);
-        match pkt.parsed_header() {
-            Ok(hdr) => {
-                let _ = write!(out, " {:?}/{:?} v{}", hdr.route_type, hdr.payload_type, hdr.version as u8);
+        // Dedup check — skip packets we've already seen
+        if dedup.has_seen(pkt) {
+            let mut out = FmtBuf::<64>::new();
+            let _ = write!(
+                out,
+                "[{}] dup (flood={} direct={})\r\n",
+                pkt_count,
+                dedup.flood_dups(),
+                dedup.direct_dups()
+            );
+            cdc_write(&mut cdc, out.as_bytes()).await;
+            continue;
+        }
+
+        // Log every new packet
+        {
+            let mut out = FmtBuf::<128>::new();
+            let _ = write!(out, "[{}] rssi={:.0} snr={:.1}", pkt_count, rx_pkt.rssi, rx_pkt.snr);
+            match pkt.parsed_header() {
+                Ok(hdr) => {
+                    let _ = write!(out, " {:?}/{:?}", hdr.route_type, hdr.payload_type);
+                }
+                Err(_) => {
+                    let _ = write!(out, " hdr=0x{:02x}", pkt.header);
+                }
             }
-            Err(_) => {
-                let _ = write!(out, " hdr=0x{:02x}(invalid)", pkt.header);
+            let _ = write!(out, " payload={}B\r\n", pkt.payload.len());
+            cdc_write(&mut cdc, out.as_bytes()).await;
+        }
+
+        // Only process GrpTxt packets for our channel
+        let is_grp_txt = pkt
+            .payload_type()
+            .map(|pt| pt == PayloadType::GrpTxt)
+            .unwrap_or(false);
+        if !is_grp_txt || !matches_channel(pkt.payload.as_slice(), channel_hash) {
+            continue;
+        }
+
+        // Decrypt the message
+        let mut scratch = [0u8; 256];
+        let decoded = match decode_grp_txt(&channel_secret, pkt.payload.as_slice(), &mut scratch) {
+            Some(d) => d,
+            None => {
+                cdc_write(&mut cdc, b"  (decrypt failed)\r\n").await;
+                continue;
+            }
+        };
+
+        // Log the decoded message
+        {
+            let mut out = FmtBuf::<200>::new();
+            let _ = write!(out, "  msg: {}\r\n", decoded.message);
+            cdc_write(&mut cdc, out.as_bytes()).await;
+        }
+
+        // Extract the command: look for "!cmd" anywhere after the ": " separator.
+        let body = match decoded.message.find(": ") {
+            Some(pos) => decoded.message[pos + 2..].trim_start(),
+            None => decoded.message.trim_start(),
+        };
+
+        // Match commands and build response
+        let mut resp_buf = FmtBuf::<160>::new();
+        let has_response = if body.starts_with("!ping") {
+            for &b in NODE_NAME {
+                resp_buf.push(b);
+            }
+            let _ = write!(resp_buf, ": pong");
+            true
+        } else if body.starts_with("!status") {
+            let uptime_secs = (embassy_time::Instant::now() - boot_time).as_secs();
+            let _ = write!(
+                resp_buf,
+                "{}: up {}s, rx={} tx={}",
+                core::str::from_utf8(NODE_NAME).unwrap_or("?"),
+                uptime_secs,
+                pkt_count,
+                0u32, // TODO: expose dispatcher stats
+            );
+            true
+        } else if body.starts_with("!path") {
+            let _ = write!(
+                resp_buf,
+                "{}: path hashes={}/{}B [",
+                core::str::from_utf8(NODE_NAME).unwrap_or("?"),
+                pkt.path_hash_count(),
+                pkt.path_hash_size(),
+            );
+            let hash_size = pkt.path_hash_size() as usize;
+            let hash_count = pkt.path_hash_count() as usize;
+            let path_bytes = pkt.path.as_slice();
+            for i in 0..hash_count {
+                if i > 0 {
+                    let _ = write!(resp_buf, ",");
+                }
+                let start = i * hash_size;
+                let end = (start + hash_size).min(path_bytes.len());
+                for &b in &path_bytes[start..end] {
+                    let _ = write!(resp_buf, "{:02x}", b);
+                }
+            }
+            let _ = write!(resp_buf, "]");
+            true
+        } else {
+            false
+        };
+
+        if has_response {
+            let ts = rtc.lock().await.get_time();
+            if let Some(reply) = encode_grp_txt(&channel_secret, channel_hash, ts, resp_buf.as_bytes()) {
+                {
+                    let mut out = FmtBuf::<200>::new();
+                    let _ = write!(
+                        out,
+                        "  TX reply: {} (len={})\r\n",
+                        core::str::from_utf8(resp_buf.as_bytes()).unwrap_or("?"),
+                        reply.wire_len()
+                    );
+                    cdc_write(&mut cdc, out.as_bytes()).await;
+                }
+
+                dedup.has_seen(&reply); // pre-register to avoid self-echo
+                TX_CHANNEL
+                    .send(TxRequest {
+                        packet: reply,
+                        priority: 0,
+                        delay_ms: 0,
+                    })
+                    .await;
             }
         }
-        let _ = write!(
-            out,
-            " path={}/{} payload={}B",
-            pkt.path_hash_count(),
-            pkt.path_hash_size(),
-            pkt.payload.len()
-        );
-        if pkt.has_transport_codes() {
-            let _ = write!(out, " tc=[{:04x},{:04x}]", pkt.transport_codes[0], pkt.transport_codes[1]);
-        }
-        let _ = write!(out, "\r\n  hex: ");
-
-        // Hex dump (first 32 bytes)
-        let payload = pkt.payload.as_slice();
-        for &b in &payload[..payload.len().min(32)] {
-            const HEX: &[u8; 16] = b"0123456789abcdef";
-            out.push(HEX[(b >> 4) as usize]);
-            out.push(HEX[(b & 0xf) as usize]);
-            out.push(b' ');
-        }
-        if payload.len() > 32 {
-            let _ = write!(out, "...");
-        }
-        let _ = write!(out, "\r\n\r\n");
-
-        cdc_write(&mut cdc, out.as_bytes()).await;
     }
 }
 
