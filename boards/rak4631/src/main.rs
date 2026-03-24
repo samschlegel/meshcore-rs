@@ -28,9 +28,10 @@ use embedded_hal_bus::spi::ExclusiveDevice;
 use lora_phy::iv::GenericSx126xInterfaceVariant;
 use lora_phy::sx126x::{self, Sx126x, TcxoCtrlVoltage};
 use lora_phy::{LoRa, RxMode};
+use meshcore_core::crypto::encrypt_then_mac;
 use meshcore_core::header::{PacketHeader, PayloadType, PayloadVersion, RouteType};
-use meshcore_core::identity::LocalIdentity;
 use meshcore_core::packet::Packet;
+use sha2::{Digest, Sha256};
 use static_cell::StaticCell;
 
 bind_interrupts!(struct Irqs {
@@ -236,69 +237,71 @@ async fn main(spawner: Spawner) {
     cdc_write(&mut cdc, b"\r\n=== RAK4631 LoRa TX/RX ===\r\n").await;
     cdc_write(&mut cdc, b"910.525 MHz / SF7 / BW62.5kHz / CR4_5 / preamble=16\r\n").await;
 
-    // ---- TX: send ADVERT on startup ----
-    // Fixed seed for testing — generates a deterministic identity
-    let seed: [u8; 32] = [
-        0x6d, 0x65, 0x73, 0x68, 0x63, 0x6f, 0x72, 0x65, // "meshcore"
-        0x2d, 0x72, 0x73, 0x2d, 0x74, 0x65, 0x73, 0x74, // "-rs-test"
-        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
-        0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
-    ];
-    let identity = LocalIdentity::from_bytes(&seed);
-    let pubkey = identity.public_key();
+    // ---- TX: send GrpTxt to #meshcore-rs channel on startup ----
+    //
+    // Hashtag channel key derivation: SHA256("#meshcore-rs") → first 16 bytes
+    // Any MeshCore device with the #meshcore-rs channel will receive this.
+    let channel_name = b"#meshcore-rs";
+    let mut channel_secret = [0u8; 32]; // 16 bytes active, rest zero
+    {
+        let mut hasher = Sha256::new();
+        hasher.update(channel_name);
+        let hash = hasher.finalize();
+        channel_secret[..16].copy_from_slice(&hash[..16]);
+    }
 
-    // Build ADVERT payload: [pubkey(32B)][timestamp(4B LE)][signature(64B)][appdata]
-    let timestamp: u32 = 0; // no RTC, use 0
-    let name = b"meshcore-rs";
-    // Appdata: flags(1B) + name
-    // flags = ADV_TYPE_CHAT(0x01) | ADV_NAME_MASK(0x80) = 0x81
-    let mut appdata = [0u8; 32];
-    appdata[0] = 0x81; // CHAT + NAME
-    appdata[1..1 + name.len()].copy_from_slice(name);
-    let appdata_len = 1 + name.len();
+    // Channel hash = first byte of SHA256(channel_secret[0..16])
+    let channel_hash = {
+        let mut hasher = Sha256::new();
+        hasher.update(&channel_secret[..16]);
+        let result = hasher.finalize();
+        result[0]
+    };
 
-    // Message to sign: pubkey + timestamp + appdata
-    let mut sign_msg = [0u8; 32 + 4 + 32];
-    sign_msg[..32].copy_from_slice(&pubkey.0);
-    sign_msg[32..36].copy_from_slice(&timestamp.to_le_bytes());
-    sign_msg[36..36 + appdata_len].copy_from_slice(&appdata[..appdata_len]);
-    let sign_msg_len = 36 + appdata_len;
-    let signature = identity.sign(&sign_msg[..sign_msg_len]);
+    // Plaintext: [timestamp(4B LE)][txt_type(1B)][message]
+    // Message format: "sender_name: text"
+    let message = b"meshcore-rs: hello from Rust!";
+    // No RTC — use seconds since boot as a placeholder timestamp
+    let timestamp: u32 = (embassy_time::Instant::now().as_millis() / 1000) as u32;
+    let mut plaintext = [0u8; 128];
+    plaintext[..4].copy_from_slice(&timestamp.to_le_bytes());
+    plaintext[4] = 0x00; // txt_type=0 (plain text), attempt=0
+    plaintext[5..5 + message.len()].copy_from_slice(message);
+    let plaintext_len = 5 + message.len();
 
-    // Assemble payload
-    let mut advert_payload = [0u8; 184];
-    let mut pos = 0;
-    advert_payload[pos..pos + 32].copy_from_slice(&pubkey.0);
-    pos += 32;
-    advert_payload[pos..pos + 4].copy_from_slice(&timestamp.to_le_bytes());
-    pos += 4;
-    advert_payload[pos..pos + 64].copy_from_slice(&signature);
-    pos += 64;
-    advert_payload[pos..pos + appdata_len].copy_from_slice(&appdata[..appdata_len]);
-    pos += appdata_len;
+    // Encrypt-then-MAC: output = [MAC(2B)][ciphertext]
+    let mut encrypted = [0u8; 184];
+    let enc_len = encrypt_then_mac(&channel_secret, &mut encrypted, &plaintext[..plaintext_len]);
 
-    // Build wire packet
+    // GrpTxt payload: [channel_hash(1B)][MAC(2B)][ciphertext]
+    let mut grp_payload = [0u8; 184];
+    grp_payload[0] = channel_hash;
+    grp_payload[1..1 + enc_len].copy_from_slice(&encrypted[..enc_len]);
+    let payload_len = 1 + enc_len;
+
+    // Build wire packet: Flood + GrpTxt + V1 = 0x15
     let header_byte: u8 = PacketHeader {
         route_type: RouteType::Flood,
-        payload_type: PayloadType::Advert,
+        payload_type: PayloadType::GrpTxt,
         version: PayloadVersion::V1,
     }
     .into();
 
-    let mut adv_pkt = Packet::new();
-    adv_pkt.header = header_byte;
-    adv_pkt.set_path_hash_size_and_count(1, 0); // no path hashes
-    let _ = adv_pkt
+    let mut grp_pkt = Packet::new();
+    grp_pkt.header = header_byte;
+    grp_pkt.set_path_hash_size_and_count(1, 0);
+    let _ = grp_pkt
         .payload
-        .extend_from_slice(&advert_payload[..pos]);
+        .extend_from_slice(&grp_payload[..payload_len]);
 
     let mut wire_buf = [0u8; 255];
-    let wire_len = adv_pkt.write_to(&mut wire_buf);
+    let wire_len = grp_pkt.write_to(&mut wire_buf);
 
-    cdc_write(&mut cdc, b"TX ADVERT: ").await;
+    cdc_write(&mut cdc, b"TX GrpTxt #meshcore-rs: ").await;
     let mut sb = SmallBuf::new();
-    let _ = write!(sb, "len={} name=\"meshcore-rs\"\r\n", wire_len);
+    let _ = write!(sb, "len={} ch=0x{:02x}\r\n", wire_len, channel_hash);
     cdc_write(&mut cdc, sb.as_bytes()).await;
+    cdc_write(&mut cdc, b"  key=SHA256(\"#meshcore-rs\")[0..16]\r\n").await;
 
     green.set_high();
     lora.prepare_for_tx(&mod_params, &mut tx_pkt_params, 20, &wire_buf[..wire_len])
