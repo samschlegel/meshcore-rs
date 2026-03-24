@@ -20,7 +20,7 @@
 
 use core::fmt::Write as FmtWrite;
 use core::panic::PanicInfo;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{compiler_fence, Ordering};
 
 use embassy_executor::Spawner;
 use embassy_nrf::gpio::{Input, Level, Output, OutputDrive, Pull};
@@ -58,8 +58,6 @@ bind_interrupts!(struct Irqs {
 // ---- Static channels for Dispatcher ↔ User task communication ----
 static TX_CHANNEL: Channel<CriticalSectionRawMutex, TxRequest, 4> = Channel::new();
 static RX_CHANNEL: Channel<CriticalSectionRawMutex, RxPacket, 4> = Channel::new();
-
-static PANICKED: AtomicBool = AtomicBool::new(false);
 
 // P1 GPIO registers for panic handler (can't use embassy GPIO after panic)
 const P1: u32 = 0x5000_0300;
@@ -104,7 +102,7 @@ fn checkpoint(n: u8) {
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
-    PANICKED.store(true, Ordering::Relaxed);
+    compiler_fence(Ordering::SeqCst);
     loop {
         raw_set(3);
         raw_clear(4);
@@ -146,34 +144,36 @@ async fn usb_task(mut device: UsbDevice<'static, MyUsbDriver>) -> ! {
     device.run().await
 }
 
-/// Write data to CDC in 64-byte chunks
 async fn cdc_write(cdc: &mut CdcAcmClass<'static, MyUsbDriver>, data: &[u8]) {
     for chunk in data.chunks(64) {
         let _ = cdc.write_packet(chunk).await;
     }
 }
 
-struct SmallBuf {
-    buf: [u8; 64],
+struct FmtBuf<const N: usize> {
+    buf: [u8; N],
     pos: usize,
 }
 
-impl SmallBuf {
+impl<const N: usize> FmtBuf<N> {
     fn new() -> Self {
-        Self {
-            buf: [0u8; 64],
-            pos: 0,
-        }
+        Self { buf: [0u8; N], pos: 0 }
     }
     fn as_bytes(&self) -> &[u8] {
         &self.buf[..self.pos]
     }
+    fn push(&mut self, b: u8) {
+        if self.pos < N {
+            self.buf[self.pos] = b;
+            self.pos += 1;
+        }
+    }
 }
 
-impl core::fmt::Write for SmallBuf {
+impl<const N: usize> core::fmt::Write for FmtBuf<N> {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
         let bytes = s.as_bytes();
-        let n = bytes.len().min(self.buf.len() - self.pos);
+        let n = bytes.len().min(N - self.pos);
         self.buf[self.pos..self.pos + n].copy_from_slice(&bytes[..n]);
         self.pos += n;
         Ok(())
@@ -194,7 +194,6 @@ async fn user_task(mut cdc: CdcAcmClass<'static, MyUsbDriver>) {
     .await;
     cdc_write(&mut cdc, b"Using meshcore-dispatch Dispatcher\r\n\r\n").await;
 
-    // ---- Build GrpTxt packet for #meshcore-rs ----
     let channel_name = b"#meshcore-rs";
     let mut channel_secret = [0u8; 32];
     {
@@ -237,18 +236,14 @@ async fn user_task(mut cdc: CdcAcmClass<'static, MyUsbDriver>) {
     let mut grp_pkt = Packet::new();
     grp_pkt.header = header_byte;
     grp_pkt.set_path_hash_size_and_count(1, 0);
-    let _ = grp_pkt
+    grp_pkt
         .payload
-        .extend_from_slice(&grp_payload[..payload_len]);
+        .extend_from_slice(&grp_payload[..payload_len])
+        .expect("GrpTxt payload exceeds MAX_PACKET_PAYLOAD");
 
     // Submit TX request via channel — Dispatcher will handle scheduling + CAD + duty cycle
-    let mut sb = SmallBuf::new();
-    let _ = write!(
-        sb,
-        "TX GrpTxt #meshcore-rs: len={} ch=0x{:02x}\r\n",
-        grp_pkt.wire_len(),
-        channel_hash
-    );
+    let mut sb = FmtBuf::<64>::new();
+    let _ = write!(sb, "TX GrpTxt #meshcore-rs: len={} ch=0x{:02x}\r\n", grp_pkt.wire_len(), channel_hash);
     cdc_write(&mut cdc, sb.as_bytes()).await;
 
     TX_CHANNEL
@@ -261,7 +256,6 @@ async fn user_task(mut cdc: CdcAcmClass<'static, MyUsbDriver>) {
 
     cdc_write(&mut cdc, b"TX queued. Listening for RX...\r\n\r\n").await;
 
-    // ---- RX loop: read from channel, print to USB ----
     let mut pkt_count: u32 = 0;
 
     loop {
@@ -269,80 +263,44 @@ async fn user_task(mut cdc: CdcAcmClass<'static, MyUsbDriver>) {
         pkt_count += 1;
 
         let pkt = &rx_pkt.packet;
+        let mut out = FmtBuf::<256>::new();
 
-        // Header line
-        let mut sb = SmallBuf::new();
-        let _ = write!(
-            sb,
-            "[{}] rssi={:.0} snr={:.1}",
-            pkt_count, rx_pkt.rssi, rx_pkt.snr
-        );
-        cdc_write(&mut cdc, sb.as_bytes()).await;
-
-        // Parse header
-        let mut sb = SmallBuf::new();
+        // Summary line
+        let _ = write!(out, "[{}] rssi={:.0} snr={:.1}", pkt_count, rx_pkt.rssi, rx_pkt.snr);
         match pkt.parsed_header() {
             Ok(hdr) => {
-                let _ = write!(
-                    sb,
-                    " {:?}/{:?} v{}",
-                    hdr.route_type, hdr.payload_type, hdr.version as u8
-                );
+                let _ = write!(out, " {:?}/{:?} v{}", hdr.route_type, hdr.payload_type, hdr.version as u8);
             }
             Err(_) => {
-                let _ = write!(sb, " hdr=0x{:02x}(invalid)", pkt.header);
+                let _ = write!(out, " hdr=0x{:02x}(invalid)", pkt.header);
             }
         }
-        cdc_write(&mut cdc, sb.as_bytes()).await;
-
-        let mut sb = SmallBuf::new();
         let _ = write!(
-            sb,
+            out,
             " path={}/{} payload={}B",
             pkt.path_hash_count(),
             pkt.path_hash_size(),
             pkt.payload.len()
         );
-        cdc_write(&mut cdc, sb.as_bytes()).await;
-
         if pkt.has_transport_codes() {
-            let mut sb = SmallBuf::new();
-            let _ = write!(
-                sb,
-                " tc=[{:04x},{:04x}]",
-                pkt.transport_codes[0], pkt.transport_codes[1]
-            );
-            cdc_write(&mut cdc, sb.as_bytes()).await;
+            let _ = write!(out, " tc=[{:04x},{:04x}]", pkt.transport_codes[0], pkt.transport_codes[1]);
         }
-        cdc_write(&mut cdc, b"\r\n").await;
+        let _ = write!(out, "\r\n  hex: ");
 
-        // Hex dump
+        // Hex dump (first 32 bytes)
         let payload = pkt.payload.as_slice();
-        let mut hex_buf = [0u8; 128];
-        let mut pos = 0;
-        for &b in b"  hex: " {
-            hex_buf[pos] = b;
-            pos += 1;
-        }
         for &b in &payload[..payload.len().min(32)] {
             const HEX: &[u8; 16] = b"0123456789abcdef";
-            hex_buf[pos] = HEX[(b >> 4) as usize];
-            hex_buf[pos + 1] = HEX[(b & 0xf) as usize];
-            hex_buf[pos + 2] = b' ';
-            pos += 3;
+            out.push(HEX[(b >> 4) as usize]);
+            out.push(HEX[(b & 0xf) as usize]);
+            out.push(b' ');
         }
         if payload.len() > 32 {
-            for &b in b"..." {
-                hex_buf[pos] = b;
-                pos += 1;
-            }
+            let _ = write!(out, "...");
         }
-        hex_buf[pos] = b'\r';
-        hex_buf[pos + 1] = b'\n';
-        pos += 2;
-        cdc_write(&mut cdc, &hex_buf[..pos]).await;
+        let _ = write!(out, "\r\n\r\n");
 
-        cdc_write(&mut cdc, b"\r\n").await;
+        cdc_write(&mut cdc, out.as_bytes()).await;
     }
 }
 
