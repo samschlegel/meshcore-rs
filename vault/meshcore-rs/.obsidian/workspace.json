@@ -110,7 +110,6 @@
             "state": {
               "type": "backlink",
               "state": {
-                "file": "Welcome.md",
                 "collapseAll": false,
                 "extraContext": false,
                 "sortOrder": "alphabetical",
@@ -120,7 +119,7 @@
                 "unlinkedCollapsed": true
               },
               "icon": "links-coming-in",
-              "title": "Backlinks for Welcome"
+              "title": "Backlinks"
             }
           },
           {
@@ -129,12 +128,11 @@
             "state": {
               "type": "outgoing-link",
               "state": {
-                "file": "Welcome.md",
                 "linksCollapsed": false,
                 "unlinkedCollapsed": true
               },
               "icon": "links-going-out",
-              "title": "Outgoing links from Welcome"
+              "title": "Outgoing links"
             }
           },
           {
@@ -172,13 +170,12 @@
             "state": {
               "type": "outline",
               "state": {
-                "file": "Welcome.md",
                 "followCursor": false,
                 "showSearch": false,
                 "searchQuery": ""
               },
               "icon": "lucide-list",
-              "title": "Outline of Welcome"
+              "title": "Outline"
             }
           }
         ]
@@ -199,8 +196,12 @@
       "bases:Create new base": false
     }
   },
-  "active": "2fd1a76efcf3502c",
+  "active": "5533dccb3714e714",
   "lastOpenFiles": [
+    "Welcome.md",
+    "Milestones/M2c-Hardware-Smoke-Test.md",
+    "Milestones/M2b-SX1262-Driver.md",
+    "Milestones/M2-Radio-Traits.md",
     "Architecture/C-Reference-Map.md",
     "Architecture/Layer-Diagram.md",
     "Architecture",
@@ -214,7 +215,6 @@
     "Tasks/Backlog.md",
     "Tasks/Current.md",
     "Tasks",
-    "Project.md",
-    "Welcome.md"
+    "Project.md"
   ]
 }
