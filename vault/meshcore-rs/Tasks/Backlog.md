@@ -7,6 +7,7 @@
 - [x] nRF52840 (RAK4631) board crate bringup #board
 - [x] Implement Dispatcher packet queue in meshcore-dispatch #dispatch
 - [ ] Implement Mesh routing layer #mesh
+- [ ] Move dedup from meshcore-core to meshcore-mesh (routing layer) #mesh #refactor
 - [ ] Create USB serial interface in meshcore-serial #serial
 - [ ] Set up CI pipeline (cargo check, clippy, test) #infra
 - [ ] ESP32 (Heltec V3) board crate bringup #board
