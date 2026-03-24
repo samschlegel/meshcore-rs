@@ -81,13 +81,13 @@ fn raw_clear(pin: u8) {
 }
 
 fn raw_delay_short() {
-    for _ in 0..2_000_000u32 {
+    for _ in 0..500_000u32 {
         cortex_m::asm::nop();
     }
 }
 
 fn raw_delay_long() {
-    for _ in 0..8_000_000u32 {
+    for _ in 0..2_000_000u32 {
         cortex_m::asm::nop();
     }
 }
@@ -123,7 +123,9 @@ struct SimpleRng {
 
 impl SimpleRng {
     fn new(seed: u32) -> Self {
-        Self { state: if seed == 0 { 1 } else { seed } }
+        Self {
+            state: if seed == 0 { 1 } else { seed },
+        }
     }
 }
 
@@ -158,7 +160,10 @@ struct SmallBuf {
 
 impl SmallBuf {
     fn new() -> Self {
-        Self { buf: [0u8; 64], pos: 0 }
+        Self {
+            buf: [0u8; 64],
+            pos: 0,
+        }
     }
     fn as_bytes(&self) -> &[u8] {
         &self.buf[..self.pos]
@@ -182,7 +187,11 @@ async fn user_task(mut cdc: CdcAcmClass<'static, MyUsbDriver>) {
     Timer::after_millis(500).await;
 
     cdc_write(&mut cdc, b"\r\n=== RAK4631 Dispatcher Test ===\r\n").await;
-    cdc_write(&mut cdc, b"910.525 MHz / SF7 / BW62.5kHz / CR4_5 / preamble=16\r\n").await;
+    cdc_write(
+        &mut cdc,
+        b"910.525 MHz / SF7 / BW62.5kHz / CR4_5 / preamble=16\r\n",
+    )
+    .await;
     cdc_write(&mut cdc, b"Using meshcore-dispatch Dispatcher\r\n\r\n").await;
 
     // ---- Build GrpTxt packet for #meshcore-rs ----
@@ -228,11 +237,18 @@ async fn user_task(mut cdc: CdcAcmClass<'static, MyUsbDriver>) {
     let mut grp_pkt = Packet::new();
     grp_pkt.header = header_byte;
     grp_pkt.set_path_hash_size_and_count(1, 0);
-    let _ = grp_pkt.payload.extend_from_slice(&grp_payload[..payload_len]);
+    let _ = grp_pkt
+        .payload
+        .extend_from_slice(&grp_payload[..payload_len]);
 
     // Submit TX request via channel — Dispatcher will handle scheduling + CAD + duty cycle
     let mut sb = SmallBuf::new();
-    let _ = write!(sb, "TX GrpTxt #meshcore-rs: len={} ch=0x{:02x}\r\n", grp_pkt.wire_len(), channel_hash);
+    let _ = write!(
+        sb,
+        "TX GrpTxt #meshcore-rs: len={} ch=0x{:02x}\r\n",
+        grp_pkt.wire_len(),
+        channel_hash
+    );
     cdc_write(&mut cdc, sb.as_bytes()).await;
 
     TX_CHANNEL
@@ -332,11 +348,13 @@ async fn user_task(mut cdc: CdcAcmClass<'static, MyUsbDriver>) {
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-    checkpoint(1);
-
     let p = embassy_nrf::init(embassy_nrf::config::Config::default());
 
+    // Initialize the LEDs
+    let _green = Output::new(p.P1_03, Level::Low, OutputDrive::Standard);
     let mut blue = Output::new(p.P1_04, Level::Low, OutputDrive::Standard);
+
+    checkpoint(1);
 
     // ---- USB CDC ACM setup ----
     let usb_driver = UsbDriver::new(p.USBD, Irqs, HardwareVbusDetect::new(Irqs));
@@ -418,11 +436,7 @@ async fn main(spawner: Spawner) {
 
     // Create Dispatcher
     let rng = SimpleRng::new(0xDEAD_BEEF);
-    let mut dispatcher = Dispatcher::<_, _, 4, 4>::new(
-        radio,
-        rng,
-        DispatcherConfig::default(),
-    );
+    let mut dispatcher = Dispatcher::<_, _, 4, 4>::new(radio, rng, DispatcherConfig::default());
 
     // Spawn user task (handles TX submission + RX printing)
     spawner.spawn(user_task(cdc).unwrap());
