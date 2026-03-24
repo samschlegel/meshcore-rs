@@ -14,4 +14,4 @@ pub mod sx1262;
 
 pub use radio::{Radio, RadioConfig, RadioError, RecvResult};
 pub use rng::Rng;
-pub use rtc::RtcClock;
+pub use rtc::{RtcClock, VolatileRtcClock};

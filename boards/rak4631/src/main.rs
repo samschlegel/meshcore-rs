@@ -18,6 +18,8 @@
 #![no_std]
 #![no_main]
 
+mod nvm;
+
 use core::fmt::Write as FmtWrite;
 use core::panic::PanicInfo;
 use core::sync::atomic::{compiler_fence, Ordering};
@@ -30,6 +32,7 @@ use embassy_nrf::usb::Driver as UsbDriver;
 use embassy_nrf::{bind_interrupts, peripherals};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
+use embassy_sync::mutex::Mutex;
 use embassy_time::{Delay, Timer};
 use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
 use embassy_usb::UsbDevice;
@@ -44,10 +47,29 @@ use meshcore_dispatch::types::{DispatcherConfig, RxPacket, TxRequest};
 use meshcore_dispatch::Dispatcher;
 use meshcore_radio::radio::RadioConfig;
 use meshcore_radio::rng::Rng;
+use meshcore_radio::rtc::RtcClock;
 use meshcore_radio::sx1262::Sx1262Radio;
+use meshcore_radio::VolatileRtcClock;
 use meshcore_radio::Radio;
 use sha2::{Digest, Sha256};
 use static_cell::StaticCell;
+
+/// Build-time UNIX epoch, baked in by build.rs.
+/// Gives the RTC a reasonable starting point even on first boot.
+const BUILD_EPOCH: u32 = const_parse_u32(env!("BUILD_EPOCH"));
+
+const fn const_parse_u32(s: &str) -> u32 {
+    let bytes = s.as_bytes();
+    let mut result: u32 = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        result = result * 10 + (bytes[i] - b'0') as u32;
+        i += 1;
+    }
+    result
+}
+
+type SharedRtc = Mutex<CriticalSectionRawMutex, VolatileRtcClock>;
 
 bind_interrupts!(struct Irqs {
     TWISPI1 => spim::InterruptHandler<peripherals::TWISPI1>;
@@ -180,9 +202,19 @@ impl<const N: usize> core::fmt::Write for FmtBuf<N> {
     }
 }
 
+/// Periodically persists the current RTC epoch to flash (every 5 minutes).
+#[embassy_executor::task]
+async fn persist_rtc_task(rtc: &'static SharedRtc) {
+    loop {
+        Timer::after_secs(300).await;
+        let epoch = rtc.lock().await.get_time();
+        nvm::write_epoch(epoch);
+    }
+}
+
 /// User task: submits TX on boot, then reads RX packets and prints to USB serial.
 #[embassy_executor::task]
-async fn user_task(mut cdc: CdcAcmClass<'static, MyUsbDriver>) {
+async fn user_task(mut cdc: CdcAcmClass<'static, MyUsbDriver>, rtc: &'static SharedRtc) {
     // Give USB a moment to enumerate
     Timer::after_millis(500).await;
 
@@ -193,6 +225,14 @@ async fn user_task(mut cdc: CdcAcmClass<'static, MyUsbDriver>) {
     )
     .await;
     cdc_write(&mut cdc, b"Using meshcore-dispatch Dispatcher\r\n\r\n").await;
+
+    // Print RTC status
+    {
+        let epoch = rtc.lock().await.get_time();
+        let mut sb = FmtBuf::<80>::new();
+        let _ = write!(sb, "RTC epoch: {} (build: {})\r\n\r\n", epoch, BUILD_EPOCH);
+        cdc_write(&mut cdc, sb.as_bytes()).await;
+    }
 
     let channel_name = b"#meshcore-rs";
     let mut channel_secret = [0u8; 32];
@@ -211,7 +251,7 @@ async fn user_task(mut cdc: CdcAcmClass<'static, MyUsbDriver>) {
     };
 
     let message = b"meshcore-rs: hello from Dispatcher!";
-    let timestamp: u32 = (embassy_time::Instant::now().as_millis() / 1000) as u32;
+    let timestamp: u32 = rtc.lock().await.get_time();
     let mut plaintext = [0u8; 128];
     plaintext[..4].copy_from_slice(&timestamp.to_le_bytes());
     plaintext[4] = 0x00;
@@ -314,6 +354,14 @@ async fn main(spawner: Spawner) {
 
     checkpoint(1);
 
+    // ---- RTC initialization ----
+    // Use the best available epoch: NVM-persisted > build-time
+    let initial_epoch = nvm::read_epoch().unwrap_or(0).max(BUILD_EPOCH);
+    static RTC: StaticCell<SharedRtc> = StaticCell::new();
+    let rtc = RTC.init(Mutex::new(VolatileRtcClock::new(initial_epoch)));
+    // Save initial epoch to NVM so even a first boot persists the build-time value
+    nvm::write_epoch(initial_epoch);
+
     // ---- USB CDC ACM setup ----
     let usb_driver = UsbDriver::new(p.USBD, Irqs, HardwareVbusDetect::new(Irqs));
 
@@ -397,7 +445,8 @@ async fn main(spawner: Spawner) {
     let mut dispatcher = Dispatcher::<_, _, 4, 4>::new(radio, rng, DispatcherConfig::default());
 
     // Spawn user task (handles TX submission + RX printing)
-    spawner.spawn(user_task(cdc).unwrap());
+    spawner.spawn(user_task(cdc, rtc).unwrap());
+    spawner.spawn(persist_rtc_task(rtc).unwrap());
 
     checkpoint(3);
     blue.set_high(); // Blue = dispatcher running
