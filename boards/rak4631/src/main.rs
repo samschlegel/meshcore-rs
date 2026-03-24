@@ -1,11 +1,18 @@
-//! RAK4631 SX1262 RX smoke test — USB serial output + LED indication.
+//! RAK4631 Dispatcher smoke test — validates M3 on real hardware.
+//!
+//! On boot:
+//!   1. Initialize SX1262 via meshcore-radio's Sx1262Radio (Radio trait)
+//!   2. Create a Dispatcher that owns the radio
+//!   3. Submit a GrpTxt to #meshcore-rs via TX channel
+//!   4. Dispatcher handles TX scheduling, duty cycle, CAD
+//!   5. Received packets are delivered via RX channel and printed to USB serial
 //!
 //! LED patterns:
 //!   1 green blink  = entered main
 //!   2 green blinks = SPI + radio init done
-//!   3 green blinks = radio configured, entering RX
-//!   green flash    = packet received
-//!   blue on        = listening (in RX mode)
+//!   3 green blinks = dispatcher running
+//!   green flash    = packet received (from RX channel)
+//!   blue on        = dispatcher active
 //!   rapid both     = PANIC
 
 #![no_std]
@@ -21,16 +28,24 @@ use embassy_nrf::spim::{self, Spim};
 use embassy_nrf::usb::vbus_detect::HardwareVbusDetect;
 use embassy_nrf::usb::Driver as UsbDriver;
 use embassy_nrf::{bind_interrupts, peripherals};
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::channel::Channel;
 use embassy_time::{Delay, Timer};
 use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
 use embassy_usb::UsbDevice;
 use embedded_hal_bus::spi::ExclusiveDevice;
 use lora_phy::iv::GenericSx126xInterfaceVariant;
 use lora_phy::sx126x::{self, Sx126x, TcxoCtrlVoltage};
-use lora_phy::{LoRa, RxMode};
+use lora_phy::LoRa;
 use meshcore_core::crypto::encrypt_then_mac;
 use meshcore_core::header::{PacketHeader, PayloadType, PayloadVersion, RouteType};
 use meshcore_core::packet::Packet;
+use meshcore_dispatch::types::{DispatcherConfig, RxPacket, TxRequest};
+use meshcore_dispatch::Dispatcher;
+use meshcore_radio::radio::RadioConfig;
+use meshcore_radio::rng::Rng;
+use meshcore_radio::sx1262::Sx1262Radio;
+use meshcore_radio::Radio;
 use sha2::{Digest, Sha256};
 use static_cell::StaticCell;
 
@@ -39,6 +54,10 @@ bind_interrupts!(struct Irqs {
     USBD => embassy_nrf::usb::InterruptHandler<peripherals::USBD>;
     CLOCK_POWER => embassy_nrf::usb::vbus_detect::InterruptHandler;
 });
+
+// ---- Static channels for Dispatcher ↔ User task communication ----
+static TX_CHANNEL: Channel<CriticalSectionRawMutex, TxRequest, 4> = Channel::new();
+static RX_CHANNEL: Channel<CriticalSectionRawMutex, RxPacket, 4> = Channel::new();
 
 static PANICKED: AtomicBool = AtomicBool::new(false);
 
@@ -96,6 +115,28 @@ fn panic(_info: &PanicInfo) -> ! {
     }
 }
 
+// ---- Simple RNG using a linear congruential generator ----
+// Good enough for CAD jitter; not crypto.
+struct SimpleRng {
+    state: u32,
+}
+
+impl SimpleRng {
+    fn new(seed: u32) -> Self {
+        Self { state: if seed == 0 { 1 } else { seed } }
+    }
+}
+
+impl Rng for SimpleRng {
+    fn random(&mut self, dest: &mut [u8]) {
+        for byte in dest.iter_mut() {
+            // LCG: state = state * 1103515245 + 12345
+            self.state = self.state.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            *byte = (self.state >> 16) as u8;
+        }
+    }
+}
+
 type MyUsbDriver = UsbDriver<'static, HardwareVbusDetect>;
 
 #[embassy_executor::task]
@@ -110,7 +151,6 @@ async fn cdc_write(cdc: &mut CdcAcmClass<'static, MyUsbDriver>, data: &[u8]) {
     }
 }
 
-/// Format a small message (up to 64 bytes) into a buffer and return the used slice
 struct SmallBuf {
     buf: [u8; 64],
     pos: usize,
@@ -118,10 +158,7 @@ struct SmallBuf {
 
 impl SmallBuf {
     fn new() -> Self {
-        Self {
-            buf: [0u8; 64],
-            pos: 0,
-        }
+        Self { buf: [0u8; 64], pos: 0 }
     }
     fn as_bytes(&self) -> &[u8] {
         &self.buf[..self.pos]
@@ -138,13 +175,167 @@ impl core::fmt::Write for SmallBuf {
     }
 }
 
+/// User task: submits TX on boot, then reads RX packets and prints to USB serial.
+#[embassy_executor::task]
+async fn user_task(mut cdc: CdcAcmClass<'static, MyUsbDriver>) {
+    // Give USB a moment to enumerate
+    Timer::after_millis(500).await;
+
+    cdc_write(&mut cdc, b"\r\n=== RAK4631 Dispatcher Test ===\r\n").await;
+    cdc_write(&mut cdc, b"910.525 MHz / SF7 / BW62.5kHz / CR4_5 / preamble=16\r\n").await;
+    cdc_write(&mut cdc, b"Using meshcore-dispatch Dispatcher\r\n\r\n").await;
+
+    // ---- Build GrpTxt packet for #meshcore-rs ----
+    let channel_name = b"#meshcore-rs";
+    let mut channel_secret = [0u8; 32];
+    {
+        let mut hasher = Sha256::new();
+        hasher.update(channel_name);
+        let hash = hasher.finalize();
+        channel_secret[..16].copy_from_slice(&hash[..16]);
+    }
+
+    let channel_hash = {
+        let mut hasher = Sha256::new();
+        hasher.update(&channel_secret[..16]);
+        let result = hasher.finalize();
+        result[0]
+    };
+
+    let message = b"meshcore-rs: hello from Dispatcher!";
+    let timestamp: u32 = (embassy_time::Instant::now().as_millis() / 1000) as u32;
+    let mut plaintext = [0u8; 128];
+    plaintext[..4].copy_from_slice(&timestamp.to_le_bytes());
+    plaintext[4] = 0x00;
+    plaintext[5..5 + message.len()].copy_from_slice(message);
+    let plaintext_len = 5 + message.len();
+
+    let mut encrypted = [0u8; 184];
+    let enc_len = encrypt_then_mac(&channel_secret, &mut encrypted, &plaintext[..plaintext_len]);
+
+    let mut grp_payload = [0u8; 184];
+    grp_payload[0] = channel_hash;
+    grp_payload[1..1 + enc_len].copy_from_slice(&encrypted[..enc_len]);
+    let payload_len = 1 + enc_len;
+
+    let header_byte: u8 = PacketHeader {
+        route_type: RouteType::Flood,
+        payload_type: PayloadType::GrpTxt,
+        version: PayloadVersion::V1,
+    }
+    .into();
+
+    let mut grp_pkt = Packet::new();
+    grp_pkt.header = header_byte;
+    grp_pkt.set_path_hash_size_and_count(1, 0);
+    let _ = grp_pkt.payload.extend_from_slice(&grp_payload[..payload_len]);
+
+    // Submit TX request via channel — Dispatcher will handle scheduling + CAD + duty cycle
+    let mut sb = SmallBuf::new();
+    let _ = write!(sb, "TX GrpTxt #meshcore-rs: len={} ch=0x{:02x}\r\n", grp_pkt.wire_len(), channel_hash);
+    cdc_write(&mut cdc, sb.as_bytes()).await;
+
+    TX_CHANNEL
+        .send(TxRequest {
+            packet: grp_pkt,
+            priority: 0,
+            delay_ms: 0,
+        })
+        .await;
+
+    cdc_write(&mut cdc, b"TX queued. Listening for RX...\r\n\r\n").await;
+
+    // ---- RX loop: read from channel, print to USB ----
+    let mut pkt_count: u32 = 0;
+
+    loop {
+        let rx_pkt = RX_CHANNEL.receive().await;
+        pkt_count += 1;
+
+        let pkt = &rx_pkt.packet;
+
+        // Header line
+        let mut sb = SmallBuf::new();
+        let _ = write!(
+            sb,
+            "[{}] rssi={:.0} snr={:.1}",
+            pkt_count, rx_pkt.rssi, rx_pkt.snr
+        );
+        cdc_write(&mut cdc, sb.as_bytes()).await;
+
+        // Parse header
+        let mut sb = SmallBuf::new();
+        match pkt.parsed_header() {
+            Ok(hdr) => {
+                let _ = write!(
+                    sb,
+                    " {:?}/{:?} v{}",
+                    hdr.route_type, hdr.payload_type, hdr.version as u8
+                );
+            }
+            Err(_) => {
+                let _ = write!(sb, " hdr=0x{:02x}(invalid)", pkt.header);
+            }
+        }
+        cdc_write(&mut cdc, sb.as_bytes()).await;
+
+        let mut sb = SmallBuf::new();
+        let _ = write!(
+            sb,
+            " path={}/{} payload={}B",
+            pkt.path_hash_count(),
+            pkt.path_hash_size(),
+            pkt.payload.len()
+        );
+        cdc_write(&mut cdc, sb.as_bytes()).await;
+
+        if pkt.has_transport_codes() {
+            let mut sb = SmallBuf::new();
+            let _ = write!(
+                sb,
+                " tc=[{:04x},{:04x}]",
+                pkt.transport_codes[0], pkt.transport_codes[1]
+            );
+            cdc_write(&mut cdc, sb.as_bytes()).await;
+        }
+        cdc_write(&mut cdc, b"\r\n").await;
+
+        // Hex dump
+        let payload = pkt.payload.as_slice();
+        let mut hex_buf = [0u8; 128];
+        let mut pos = 0;
+        for &b in b"  hex: " {
+            hex_buf[pos] = b;
+            pos += 1;
+        }
+        for &b in &payload[..payload.len().min(32)] {
+            const HEX: &[u8; 16] = b"0123456789abcdef";
+            hex_buf[pos] = HEX[(b >> 4) as usize];
+            hex_buf[pos + 1] = HEX[(b & 0xf) as usize];
+            hex_buf[pos + 2] = b' ';
+            pos += 3;
+        }
+        if payload.len() > 32 {
+            for &b in b"..." {
+                hex_buf[pos] = b;
+                pos += 1;
+            }
+        }
+        hex_buf[pos] = b'\r';
+        hex_buf[pos + 1] = b'\n';
+        pos += 2;
+        cdc_write(&mut cdc, &hex_buf[..pos]).await;
+
+        cdc_write(&mut cdc, b"\r\n").await;
+    }
+}
+
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     checkpoint(1);
 
     let p = embassy_nrf::init(embassy_nrf::config::Config::default());
 
-    let mut green = Output::new(p.P1_03, Level::Low, OutputDrive::Standard);
     let mut blue = Output::new(p.P1_04, Level::Low, OutputDrive::Standard);
 
     // ---- USB CDC ACM setup ----
@@ -160,9 +351,9 @@ async fn main(spawner: Spawner) {
     let msos_desc = MSOS_DESC.init([0u8; 256]);
     let control_buf = CONTROL_BUF.init([0u8; 64]);
 
-    let mut usb_config = embassy_usb::Config::new(0x1209, 0x0001); // pid.codes test VID/PID
+    let mut usb_config = embassy_usb::Config::new(0x1209, 0x0001);
     usb_config.manufacturer = Some("meshcore-rs");
-    usb_config.product = Some("RAK4631 LoRa RX");
+    usb_config.product = Some("RAK4631 Dispatcher");
     usb_config.serial_number = Some("0001");
     usb_config.max_power = 100;
     usb_config.max_packet_size_0 = 64;
@@ -178,12 +369,11 @@ async fn main(spawner: Spawner) {
 
     static CDC_STATE: StaticCell<State<'static>> = StaticCell::new();
     let cdc_state = CDC_STATE.init(State::new());
-    let mut cdc = CdcAcmClass::new(&mut builder, cdc_state, 64);
+    let cdc = CdcAcmClass::new(&mut builder, cdc_state, 64);
 
     let usb = builder.build();
     spawner.spawn(usb_task(usb).unwrap());
 
-    // Give USB a moment to enumerate
     Timer::after_millis(1000).await;
 
     // ---- SPI + SX1262 setup ----
@@ -204,240 +394,43 @@ async fn main(spawner: Spawner) {
         chip: sx126x::Sx1262,
         tcxo_ctrl: Some(TcxoCtrlVoltage::Ctrl1V8),
         use_dcdc: true,
-        rx_boost: true, // boost RX gain for better sensitivity
+        rx_boost: true,
     };
 
     let radio_kind = Sx126x::new(spi_device, iv, config);
-    let mut lora = LoRa::new(radio_kind, false, Delay).await.unwrap();
+    let lora = LoRa::new(radio_kind, false, Delay).await.unwrap();
 
     checkpoint(2);
 
-    // Configure: 910.525 MHz, BW 62.5 kHz, SF 7, CR 4/5
-    let mod_params = lora
-        .create_modulation_params(
-            lora_phy::mod_params::SpreadingFactor::_7,
-            lora_phy::mod_params::Bandwidth::_62KHz,
-            lora_phy::mod_params::CodingRate::_4_5,
-            910_525_000,
-        )
-        .unwrap();
+    // Wrap in our Radio trait
+    let mut radio = Sx1262Radio::new(lora);
 
-    // MeshCore uses 16-symbol preamble (not the default 8)
-    let rx_pkt_params = lora
-        .create_rx_packet_params(16, false, 255, true, false, &mod_params)
-        .unwrap();
+    // Configure: 910.525 MHz, BW 62.5 kHz, SF 7, CR 4/5, 16-symbol preamble
+    let radio_config = RadioConfig {
+        frequency_mhz: 910.525,
+        bandwidth_khz: 62.5,
+        spreading_factor: 7,
+        coding_rate: 5,
+        tx_power: 20,
+        preamble_symbols: 16,
+    };
+    radio.configure(&radio_config).await.unwrap();
 
-    let mut tx_pkt_params = lora
-        .create_tx_packet_params(16, false, true, false, &mod_params)
-        .unwrap();
+    // Create Dispatcher
+    let rng = SimpleRng::new(0xDEAD_BEEF);
+    let mut dispatcher = Dispatcher::<_, _, 4, 4>::new(
+        radio,
+        rng,
+        DispatcherConfig::default(),
+    );
+
+    // Spawn user task (handles TX submission + RX printing)
+    spawner.spawn(user_task(cdc).unwrap());
 
     checkpoint(3);
+    blue.set_high(); // Blue = dispatcher running
 
-    // Write startup banner to USB serial
-    cdc_write(&mut cdc, b"\r\n=== RAK4631 LoRa TX/RX ===\r\n").await;
-    cdc_write(&mut cdc, b"910.525 MHz / SF7 / BW62.5kHz / CR4_5 / preamble=16\r\n").await;
-
-    // ---- TX: send GrpTxt to #meshcore-rs channel on startup ----
-    //
-    // Hashtag channel key derivation: SHA256("#meshcore-rs") → first 16 bytes
-    // Any MeshCore device with the #meshcore-rs channel will receive this.
-    let channel_name = b"#meshcore-rs";
-    let mut channel_secret = [0u8; 32]; // 16 bytes active, rest zero
-    {
-        let mut hasher = Sha256::new();
-        hasher.update(channel_name);
-        let hash = hasher.finalize();
-        channel_secret[..16].copy_from_slice(&hash[..16]);
-    }
-
-    // Channel hash = first byte of SHA256(channel_secret[0..16])
-    let channel_hash = {
-        let mut hasher = Sha256::new();
-        hasher.update(&channel_secret[..16]);
-        let result = hasher.finalize();
-        result[0]
-    };
-
-    // Plaintext: [timestamp(4B LE)][txt_type(1B)][message]
-    // Message format: "sender_name: text"
-    let message = b"meshcore-rs: hello from Rust!";
-    // No RTC — use seconds since boot as a placeholder timestamp
-    let timestamp: u32 = (embassy_time::Instant::now().as_millis() / 1000) as u32;
-    let mut plaintext = [0u8; 128];
-    plaintext[..4].copy_from_slice(&timestamp.to_le_bytes());
-    plaintext[4] = 0x00; // txt_type=0 (plain text), attempt=0
-    plaintext[5..5 + message.len()].copy_from_slice(message);
-    let plaintext_len = 5 + message.len();
-
-    // Encrypt-then-MAC: output = [MAC(2B)][ciphertext]
-    let mut encrypted = [0u8; 184];
-    let enc_len = encrypt_then_mac(&channel_secret, &mut encrypted, &plaintext[..plaintext_len]);
-
-    // GrpTxt payload: [channel_hash(1B)][MAC(2B)][ciphertext]
-    let mut grp_payload = [0u8; 184];
-    grp_payload[0] = channel_hash;
-    grp_payload[1..1 + enc_len].copy_from_slice(&encrypted[..enc_len]);
-    let payload_len = 1 + enc_len;
-
-    // Build wire packet: Flood + GrpTxt + V1 = 0x15
-    let header_byte: u8 = PacketHeader {
-        route_type: RouteType::Flood,
-        payload_type: PayloadType::GrpTxt,
-        version: PayloadVersion::V1,
-    }
-    .into();
-
-    let mut grp_pkt = Packet::new();
-    grp_pkt.header = header_byte;
-    grp_pkt.set_path_hash_size_and_count(1, 0);
-    let _ = grp_pkt
-        .payload
-        .extend_from_slice(&grp_payload[..payload_len]);
-
-    let mut wire_buf = [0u8; 255];
-    let wire_len = grp_pkt.write_to(&mut wire_buf);
-
-    cdc_write(&mut cdc, b"TX GrpTxt #meshcore-rs: ").await;
-    let mut sb = SmallBuf::new();
-    let _ = write!(sb, "len={} ch=0x{:02x}\r\n", wire_len, channel_hash);
-    cdc_write(&mut cdc, sb.as_bytes()).await;
-    cdc_write(&mut cdc, b"  key=SHA256(\"#meshcore-rs\")[0..16]\r\n").await;
-
-    green.set_high();
-    lora.prepare_for_tx(&mod_params, &mut tx_pkt_params, 20, &wire_buf[..wire_len])
-        .await
-        .unwrap();
-    lora.tx().await.unwrap();
-    green.set_low();
-
-    cdc_write(&mut cdc, b"TX done. Listening...\r\n\r\n").await;
-
-    // ---- RX loop ----
-    // Prepare once — in continuous mode the radio stays in RX after each packet.
-    // rx() uses DIO1 async wait (GPIOTE interrupt), so the CPU sleeps between packets.
-    lora.prepare_for_rx(RxMode::Continuous, &mod_params, &rx_pkt_params)
-        .await
-        .unwrap();
-
-    let mut rx_buf = [0u8; 255];
-    let mut pkt_count: u32 = 0;
-
-    loop {
-        blue.set_high(); // blue = listening
-
-        match lora.rx(&rx_pkt_params, &mut rx_buf).await {
-            Ok((len, status)) => {
-                pkt_count += 1;
-                blue.set_low();
-                green.set_high();
-
-                let data = &rx_buf[..len as usize];
-
-                // Header line
-                let mut sb = SmallBuf::new();
-                let _ = write!(
-                    sb,
-                    "[{}] len={} rssi={} snr={}\r\n",
-                    pkt_count, len, status.rssi, status.snr
-                );
-                cdc_write(&mut cdc, sb.as_bytes()).await;
-
-                // Hex dump — build in a larger stack buffer, send chunked
-                let mut hex_buf = [0u8; 776]; // "  hex: " + 255*3 + "\r\n"
-                let mut pos = 0;
-                for &b in b"  hex: " {
-                    hex_buf[pos] = b;
-                    pos += 1;
-                }
-                for &b in data {
-                    const HEX: &[u8; 16] = b"0123456789abcdef";
-                    hex_buf[pos] = HEX[(b >> 4) as usize];
-                    hex_buf[pos + 1] = HEX[(b & 0xf) as usize];
-                    hex_buf[pos + 2] = b' ';
-                    pos += 3;
-                }
-                hex_buf[pos] = b'\r';
-                hex_buf[pos + 1] = b'\n';
-                pos += 2;
-                cdc_write(&mut cdc, &hex_buf[..pos]).await;
-
-                // ASCII representation
-                let mut asc_buf = [0u8; 266]; // "  asc: " + 255 + "\r\n"
-                let mut pos = 0;
-                for &b in b"  asc: " {
-                    asc_buf[pos] = b;
-                    pos += 1;
-                }
-                for &b in data {
-                    asc_buf[pos] = if b >= 0x20 && b < 0x7f { b } else { b'.' };
-                    pos += 1;
-                }
-                for &b in b"\r\n" {
-                    asc_buf[pos] = b;
-                    pos += 1;
-                }
-                cdc_write(&mut cdc, &asc_buf[..pos]).await;
-
-                // Parse as MeshCore packet
-                let mut pkt = Packet::new();
-                if pkt.read_from(data) {
-                    pkt.snr = status.snr as i8;
-                    let mut sb = SmallBuf::new();
-                    match pkt.parsed_header() {
-                        Ok(hdr) => {
-                            let _ = write!(
-                                sb,
-                                "  pkt: {:?}/{:?} v{}",
-                                hdr.route_type, hdr.payload_type, hdr.version as u8
-                            );
-                        }
-                        Err(_) => {
-                            let _ = write!(sb, "  pkt: hdr=0x{:02x} (invalid)", pkt.header);
-                        }
-                    }
-                    cdc_write(&mut cdc, sb.as_bytes()).await;
-
-                    let mut sb = SmallBuf::new();
-                    let _ = write!(
-                        sb,
-                        " path={}/{} payload={}B",
-                        pkt.path_hash_count(),
-                        pkt.path_hash_size(),
-                        pkt.payload.len()
-                    );
-                    cdc_write(&mut cdc, sb.as_bytes()).await;
-
-                    if pkt.has_transport_codes() {
-                        let mut sb = SmallBuf::new();
-                        let _ = write!(
-                            sb,
-                            " tc=[{:04x},{:04x}]",
-                            pkt.transport_codes[0], pkt.transport_codes[1]
-                        );
-                        cdc_write(&mut cdc, sb.as_bytes()).await;
-                    }
-                    cdc_write(&mut cdc, b"\r\n").await;
-                } else {
-                    cdc_write(&mut cdc, b"  pkt: parse failed\r\n").await;
-                }
-                cdc_write(&mut cdc, b"\r\n").await;
-
-                // Green flash for each received packet
-                Timer::after_millis(100).await;
-                green.set_low();
-            }
-            Err(_e) => {
-                blue.set_low();
-                // Brief red-ish indication (both LEDs)
-                green.set_high();
-                blue.set_high();
-                Timer::after_millis(50).await;
-                green.set_low();
-                blue.set_low();
-
-                cdc_write(&mut cdc, b"[RX error]\r\n").await;
-                Timer::after_millis(500).await;
-            }
-        }
-    }
+    // Run the dispatcher event loop (never returns).
+    // This owns the radio and handles all TX/RX scheduling.
+    dispatcher.run(&TX_CHANNEL, &RX_CHANNEL).await;
 }

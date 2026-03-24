@@ -51,10 +51,12 @@ pub struct RadioConfig {
     pub coding_rate: u8,
     /// Transmit power in dBm.
     pub tx_power: i8,
+    /// Preamble length in symbols. MeshCore uses 16.
+    pub preamble_symbols: u16,
 }
 
 impl Default for RadioConfig {
-    /// MeshCore C defaults: 869.618 MHz, BW 62.5 kHz, SF 8, CR 4/5, TX 22 dBm.
+    /// MeshCore C defaults: 869.618 MHz, BW 62.5 kHz, SF 8, CR 4/5, TX 22 dBm, 16-symbol preamble.
     fn default() -> Self {
         Self {
             frequency_mhz: 869.618,
@@ -62,6 +64,7 @@ impl Default for RadioConfig {
             spreading_factor: 8,
             coding_rate: 5,
             tx_power: 22,
+            preamble_symbols: 16,
         }
     }
 }

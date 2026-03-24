@@ -112,14 +112,16 @@ impl<RK: RadioKind, DLY: DelayNs> Radio for Sx1262Radio<RK, DLY> {
             .create_modulation_params(sf, bw, cr, freq_hz)
             .map_err(|_| RadioError::ConfigError)?;
 
+        let preamble = config.preamble_symbols;
+
         let tx_pkt_params = self
             .lora
-            .create_tx_packet_params(8, false, true, false, &modulation)
+            .create_tx_packet_params(preamble, false, true, false, &modulation)
             .map_err(|_| RadioError::ConfigError)?;
 
         let rx_pkt_params = self
             .lora
-            .create_rx_packet_params(8, false, MAX_TRANS_UNIT as u8, true, false, &modulation)
+            .create_rx_packet_params(preamble, false, MAX_TRANS_UNIT as u8, true, false, &modulation)
             .map_err(|_| RadioError::ConfigError)?;
 
         self.modulation = Some(modulation);

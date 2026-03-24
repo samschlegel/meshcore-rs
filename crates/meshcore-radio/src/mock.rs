@@ -65,13 +65,7 @@ impl MockRadio {
 
 impl Radio for MockRadio {
     async fn configure(&mut self, config: &RadioConfig) -> Result<(), RadioError> {
-        self.config = Some(RadioConfig {
-            frequency_mhz: config.frequency_mhz,
-            bandwidth_khz: config.bandwidth_khz,
-            spreading_factor: config.spreading_factor,
-            coding_rate: config.coding_rate,
-            tx_power: config.tx_power,
-        });
+        self.config = Some(*config);
         self.sleeping = false;
         Ok(())
     }
@@ -232,6 +226,7 @@ mod tests {
                 spreading_factor: 7,
                 coding_rate: 5,
                 tx_power: 14,
+                ..Default::default()
             };
             radio.configure(&config).await.unwrap();
             assert!(radio.is_configured());
