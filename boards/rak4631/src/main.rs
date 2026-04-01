@@ -23,7 +23,6 @@
 #![no_std]
 #![no_main]
 
-mod nvm;
 
 use core::fmt::Write as FmtWrite;
 use core::panic::PanicInfo;
@@ -204,16 +203,6 @@ impl<const N: usize> core::fmt::Write for FmtBuf<N> {
         self.buf[self.pos..self.pos + n].copy_from_slice(&bytes[..n]);
         self.pos += n;
         Ok(())
-    }
-}
-
-/// Periodically persists the current RTC epoch to flash (every 5 minutes).
-#[embassy_executor::task]
-async fn persist_rtc_task(rtc: &'static SharedRtc) {
-    loop {
-        Timer::after_secs(300).await;
-        let epoch = rtc.lock().await.get_time();
-        nvm::write_epoch(epoch);
     }
 }
 
@@ -457,12 +446,8 @@ async fn main(spawner: Spawner) {
     checkpoint(1);
 
     // ---- RTC initialization ----
-    // Use the best available epoch: NVM-persisted > build-time
-    let initial_epoch = nvm::read_epoch().unwrap_or(0).max(BUILD_EPOCH);
     static RTC: StaticCell<SharedRtc> = StaticCell::new();
-    let rtc = RTC.init(Mutex::new(VolatileRtcClock::new(initial_epoch)));
-    // Save initial epoch to NVM so even a first boot persists the build-time value
-    nvm::write_epoch(initial_epoch);
+    let rtc = RTC.init(Mutex::new(VolatileRtcClock::new(BUILD_EPOCH)));
 
     // ---- USB CDC ACM setup ----
     let usb_driver = UsbDriver::new(p.USBD, Irqs, HardwareVbusDetect::new(Irqs));
@@ -548,7 +533,6 @@ async fn main(spawner: Spawner) {
 
     // Spawn user task (handles TX submission + RX printing)
     spawner.spawn(user_task(cdc, rtc).unwrap());
-    spawner.spawn(persist_rtc_task(rtc).unwrap());
 
     checkpoint(3);
     blue.set_high(); // Blue = dispatcher running

@@ -10,7 +10,7 @@ fn main() {
     println!("cargo:rerun-if-changed=memory.x");
 
     // Bake build-time UNIX epoch into the binary so the RTC starts
-    // close to real time even without NVM or companion sync.
+    // close to real time even without companion sync.
     let epoch = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
