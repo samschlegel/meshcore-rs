@@ -26,4 +26,5 @@ embedded-hal-async = { version = "1.0", default-features = false }
 
 [profile.release]
 opt-level = "z"
+debug = 2
 lto = true

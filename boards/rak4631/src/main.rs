@@ -297,6 +297,8 @@ async fn user_task(mut cdc: CdcAcmClass<'static, MyUsbDriver>, rtc: &'static Sha
 
         let pkt = &rx_pkt.packet;
 
+        defmt::debug!("rx: rssi={} snr={} hdr={=u8:#04x} payload={}B", rx_pkt.rssi as i32, rx_pkt.snr as i32, pkt.header, pkt.payload.len());
+
         // Dedup check — skip packets we've already seen
         if dedup.has_seen(pkt) {
             let mut out = FmtBuf::<64>::new();
@@ -341,6 +343,7 @@ async fn user_task(mut cdc: CdcAcmClass<'static, MyUsbDriver>, rtc: &'static Sha
         let decoded = match decode_grp_txt(&channel_secret, pkt.payload.as_slice(), &mut scratch) {
             Some(d) => d,
             None => {
+                defmt::warn!("grp_txt: decrypt failed");
                 cdc_write(&mut cdc, b"  (decrypt failed)\r\n").await;
                 continue;
             }
@@ -410,6 +413,7 @@ async fn user_task(mut cdc: CdcAcmClass<'static, MyUsbDriver>, rtc: &'static Sha
         };
 
         if has_response {
+            defmt::info!("cmd: sending response");
             let ts = rtc.lock().await.get_time();
             if let Some(reply) = encode_grp_txt(&channel_secret, channel_hash, ts, resp_buf.as_bytes()) {
                 {
@@ -439,6 +443,7 @@ async fn user_task(mut cdc: CdcAcmClass<'static, MyUsbDriver>, rtc: &'static Sha
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let p = embassy_nrf::init(embassy_nrf::config::Config::default());
+    defmt::info!("boot: embassy init done");
 
     // Initialize the LEDs
     let _green = Output::new(p.P1_03, Level::Low, OutputDrive::Standard);
@@ -511,6 +516,7 @@ async fn main(spawner: Spawner) {
 
     let radio_kind = Sx126x::new(spi_device, iv, config);
     let lora = LoRa::new(radio_kind, false, Delay).await.unwrap();
+    defmt::info!("boot: SX1262 radio initialized");
 
     checkpoint(2);
 
@@ -527,6 +533,7 @@ async fn main(spawner: Spawner) {
         preamble_symbols: 16,
     };
     radio.configure(&radio_config).await.unwrap();
+    defmt::info!("boot: radio configured (910.525 MHz / SF7 / BW62.5kHz)");
 
     // Create Dispatcher
     let rng = SimpleRng::new(0xDEAD_BEEF);
@@ -537,6 +544,7 @@ async fn main(spawner: Spawner) {
 
     checkpoint(3);
     blue.set_high(); // Blue = dispatcher running
+    defmt::info!("boot: dispatcher running, entering main loop");
 
     // Run the dispatcher event loop (never returns).
     // This owns the radio and handles all TX/RX scheduling.
