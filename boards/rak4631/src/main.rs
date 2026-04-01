@@ -23,6 +23,7 @@
 #![no_std]
 #![no_main]
 
+use defmt_rtt as _;
 
 use core::fmt::Write as FmtWrite;
 use core::panic::PanicInfo;

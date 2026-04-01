@@ -3,9 +3,12 @@ target = "thumbv7em-none-eabihf"
 
 [target.thumbv7em-none-eabihf]
 # For probe-rs debugging (if available):
-# runner = "probe-rs run --chip nRF52840_xxAA"
+runner = "probe-rs run --chip nRF52840_xxAA"
 #
 # For UF2 bootloader flashing, build with:
 #   cargo build --release
 # Then convert to UF2 and drag-drop onto the RAK4631 drive.
-rustflags = ["-C", "link-arg=-Tlink.x"]
+rustflags = [
+    "-C", "link-arg=-Tlink.x",
+    "-C", "link-arg=-Tdefmt.x",
+]

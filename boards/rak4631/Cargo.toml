@@ -11,10 +11,14 @@ embassy-time = "0.5"
 embassy-nrf = { version = "0.10", features = ["nrf52840", "time-driver-rtc1", "gpiote", "time"] }
 embassy-futures = "0.1"
 
+# Logging
+defmt = { workspace = true }
+defmt-rtt = { workspace = true }
+
 # MeshCore protocol
-meshcore-core = { path = "../../crates/meshcore-core" }
-meshcore-radio = { path = "../../crates/meshcore-radio", features = ["sx1262"] }
-meshcore-dispatch = { path = "../../crates/meshcore-dispatch" }
+meshcore-core = { path = "../../crates/meshcore-core", features = ["defmt"] }
+meshcore-radio = { path = "../../crates/meshcore-radio", features = ["sx1262", "defmt"] }
+meshcore-dispatch = { path = "../../crates/meshcore-dispatch", features = ["defmt"] }
 embassy-sync = "0.6"
 sha2 = { version = "0.10", default-features = false }
 

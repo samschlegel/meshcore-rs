@@ -20,4 +20,4 @@ critical-section = { version = "1", features = ["std"] }
 
 [features]
 default = []
-defmt = ["dep:defmt", "meshcore-core/defmt", "meshcore-radio/defmt"]
+defmt = ["dep:defmt", "meshcore-core/defmt", "meshcore-radio/defmt", "embassy-time/defmt"]
